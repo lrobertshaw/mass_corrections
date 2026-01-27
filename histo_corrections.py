@@ -24,7 +24,7 @@ def fill_scale_factors(sf, max_k=5, fallback=1.0):
     return filled
 
 
-def fill_nan_adaptive_2d(arr, max_k=5, fallback=1.0, threshold=30):    # threshold is min num bins
+def fill_nan_adaptive_2d(arr, max_k=3, fallback=1.0, threshold=30):    # threshold is min num bins
     # assert max_k % 2 == 1, "max_k must be odd"
     filled = arr.copy()
     nx, ny = arr.shape
@@ -57,8 +57,8 @@ def fill_nan_adaptive_2d(arr, max_k=5, fallback=1.0, threshold=30):    # thresho
 class Jet:
 
     required_variables = ["pt", "eta", "mass", "genpt", "genmass", "event"]    # variables required for the class to function
-    # l1_vars = ["pt", "mass", "eta"]    # variables to bin on
-    l1_vars = ["pt", "eta"]    # variables to bin on
+    l1_vars = ["pt", "mass", "eta"]    # variables to bin on
+    # l1_vars = ["pt", "eta"]    # variables to bin on
     # l1_vars = ["mass", "eta"]    # variables to bin on
     
     def __init__(self, path: str, branch: str = "outnano/Jets",
@@ -93,6 +93,13 @@ class Jet:
         mask = mask & ( data["pt"] > l1_pt_range[0]) & (data["pt"] < l1_pt_range[1] )
 
         mask = mask & (abs(data["eta"]) < eta_limit)
+
+        data["pt_resp"] = Jet.response(data)[0]
+        data["mass_resp"] = Jet.response(data)[1]
+
+        # remove extreme response values
+        mask = mask & (data["pt_resp"] > 0.2) & (data["mass_resp"] > 0.2) & (data["pt_resp"] < 5.0) & (data["mass_resp"] < 5.0)
+
         return data[mask]
     
 
@@ -102,7 +109,7 @@ class Jet:
         splitIdx = int(len(data) * train_ratio)
         data_train, data_test = data[:splitIdx], data[splitIdx:]
         return data_train, data_test
-    
+
 
     @staticmethod
     def response(data_train, eps = 1e-3):
@@ -132,25 +139,22 @@ class Jet:
 
         pt_resp = binned_statistic_dd( train_numpy, ak.to_numpy(pt_response), statistic = how, bins = bin_edges )[0]
         mass_resp = binned_statistic_dd( train_numpy, ak.to_numpy(mass_response), statistic = how, bins = bin_edges )[0]
-
-        counts = binned_statistic_dd(
-            train_numpy, np.ones(len(train_numpy)),
-            statistic='count', bins=bin_edges
-        )[0]
-        
+        counts = binned_statistic_dd(train_numpy, np.ones(len(train_numpy)), statistic='count', bins=bin_edges)[0]
 
         pt_sf_raw = 1.0 / pt_resp
         mass_sf_raw = 1.0 / mass_resp
-
         if len(Jet.l1_vars) == 3:
             pt_sf = fill_scale_factors(pt_sf_raw, max_k=5, fallback=1.0)
             mass_sf = fill_scale_factors(mass_sf_raw, max_k=5, fallback=1.0)
+
         else:
             pt_sf = 1 / np.nan_to_num(pt_resp, nan=nans)
             mass_sf = 1 / np.nan_to_num(mass_resp, nan=nans)
 
-        return ScaleFactors(pt_sf, mass_sf, bin_edges, counts)
-    
+        return ScaleFactors(
+            np.clip(pt_sf, a_min=0.25, a_max=4.0), np.clip(mass_sf, a_min=0.25, a_max=4.0),
+            bin_edges, counts)
+
 
     @staticmethod
     def apply_scale_factors(data_test, scale_factors: ScaleFactors):
@@ -198,11 +202,20 @@ class Jet:
         print("Data preprocessed!\n")
 
         print("Calculating response of each jet from training data...")
-        pt_response, mass_response = self.response(train, eps=eps)
+        # pt_response, mass_response = self.response(train, eps=eps)
         print("Responses calculated!\n")
 
         print("Histogramming responses, calculating mean of each bin, and determining scale factor as inverse of mean response...")
-        scale_factors = self.histogram(train, pt_response, mass_response, nBins=nBins, nans=nans, how=how)
+        scale_factors = self.histogram(train, train["pt_resp"], train["mass_resp"], nBins=nBins, nans=nans, how=how)
         print("Scale factors calculated!\n")
 
         return test, scale_factors
+
+
+def plot_scale_factors(scale_factors: ScaleFactors, region: str = "barrel"):
+    pt_sf, mass_sf, bin_edges, counts = scale_factors
+    from plotting.plot_scale_factors import plot_bin_densities_3d, scale_factors_heatmap
+
+    sf_dict = {"pt": pt_sf, "mass": mass_sf}
+    scale_factors_heatmap(bin_edges, region, **sf_dict)
+    plot_bin_densities_3d(bin_edges, counts, region)
